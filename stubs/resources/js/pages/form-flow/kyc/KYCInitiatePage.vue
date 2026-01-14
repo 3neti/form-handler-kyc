@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from 'vue';
 import { router } from '@inertiajs/vue3';
 import PublicLayout from '@/layouts/PublicLayout.vue';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -12,15 +13,53 @@ interface Props {
     config?: {
         title?: string;
         description?: string;
+        use_fake?: boolean;
     };
     kyc_status?: string | null;
+    mobile?: string | null;
+    country?: string;
 }
 
 const props = defineProps<Props>();
 
+// Set to true for local debugging
+const DEBUG = false;
+
+// Debug: Generate expected callback URL format
+const debugCallbackUrl = computed(() => {
+    const cleanFlowId = props.flow_id.replace(/\./g, '-');
+    const timestamp = Date.now();
+    const transactionId = `formflow-${cleanFlowId}-${Math.floor(timestamp / 1000)}`;
+    return `http://redeem-x.test/form-flow/kyc/callback?transactionId=${transactionId}&status=auto_approved`;
+});
+
 const startKYC = () => {
-    // Initiate KYC verification
-    router.post(`/form-flow/${props.flow_id}/kyc/initiate`);
+    console.log('[KYCInitiatePage] Starting KYC verification', {
+        flow_id: props.flow_id,
+        mobile: props.mobile,
+        country: props.country,
+        use_fake: props.config?.use_fake,
+    });
+    
+    // Check if fake mode is enabled
+    if (props.config?.use_fake) {
+        // Fake mode: Submit form data directly (like location handler)
+        console.log('[KYCInitiatePage] 🎭 FAKE MODE - Submitting to step endpoint');
+        router.post(`/form-flow/${props.flow_id}/step/${props.step}`, {
+            data: {
+                mobile: props.mobile,
+                country: props.country || 'PH',
+            }
+        });
+    } else {
+        // Real mode: Initiate HyperVerge flow
+        console.log('[KYCInitiatePage] Real mode - Initiating HyperVerge');
+        router.post(`/form-flow/${props.flow_id}/kyc/initiate`, {
+            mobile: props.mobile,
+            country: props.country || 'PH',
+            step_index: parseInt(props.step, 10),
+        });
+    }
 };
 
 const continueFlow = () => {
@@ -73,6 +112,19 @@ const continueFlow = () => {
                                 Identity verification is required. This process takes 1-2 minutes and uses your device camera.
                             </AlertDescription>
                         </Alert>
+                        
+                        <!-- Debug: Show callback URL in real mode -->
+                        <Alert v-if="DEBUG && !config?.use_fake" class="border-yellow-200 bg-yellow-50">
+                            <AlertCircle class="h-4 w-4 text-yellow-600" />
+                            <AlertDescription class="text-yellow-800 text-xs">
+                                <strong>Debug (Real Mode):</strong> After completing KYC, if not redirected, manually visit:
+                                <br />
+                                <code class="block mt-2 p-2 bg-white rounded text-xs break-all">
+                                    {{ debugCallbackUrl }}
+                                </code>
+                            </AlertDescription>
+                        </Alert>
+                        
                         <Button @click="startKYC" size="lg" class="w-full">
                             Start Identity Verification
                         </Button>
