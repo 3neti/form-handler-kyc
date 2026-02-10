@@ -177,17 +177,23 @@ class KYCFlowController extends Controller
                 ->with('error', 'Failed to fetch KYC results.');
         }
 
+        // Flatten KYC data for consistent storage (same format as fake mode)
+        $flattenedKycData = $this->flattenKYCData($kycData);
+        
+        // Add step name for consistent normalization in downstream processing
+        $flattenedKycData['_step_name'] = 'kyc_verification';
         
         // Complete the step via FormFlowService
         try {
             $flowService = app(\LBHurtado\FormFlowManager\Services\FormFlowService::class);
-            $flowService->updateStepData($flow_id, $stepIndex, $kycData);
+            $flowService->updateStepData($flow_id, $stepIndex, $flattenedKycData);
             
             // CRITICAL: Store completed step in cache for browser session to pick up
             // This is necessary because callback runs in different session than user's browser
+            // NOTE: Store FLATTENED data (not raw $kycData) so FormFlowController uses consistent format
             Cache::put("kyc_completed.{$flow_id}", [
                 'step_index' => $stepIndex,
-                'kyc_data' => $kycData,
+                'kyc_data' => $flattenedKycData,
                 'completed_at' => now()->toIso8601String(),
             ], now()->addMinutes(10));
             
@@ -271,5 +277,44 @@ class KYCFlowController extends Controller
             'completed_at' => $kycData['completed_at'] ?? null,
             'rejection_reasons' => $kycData['rejection_reasons'] ?? [],
         ]);
+    }
+    
+    /**
+     * Flatten KYC data for storage.
+     * Extracts nested module details to root level for consistent mapping.
+     */
+    protected function flattenKYCData(array $kycData): array
+    {
+        $idCardDetails = null;
+        $idCardImageUrl = null;
+        $idCardCroppedImageUrl = null;
+        $selfieImageUrl = null;
+        
+        // Find id_card and selfie modules
+        foreach ($kycData['modules'] ?? [] as $module) {
+            if (in_array($module['module'], ['id_card', 'ID Card Validation', 'ID Card Validation front'])) {
+                $idCardDetails = $module['details'] ?? [];
+                $idCardImageUrl = $module['imageUrl'] ?? null;
+                $idCardCroppedImageUrl = $module['croppedImageUrl'] ?? null;
+            }
+            if (in_array($module['module'], ['selfie', 'Selfie Validation'])) {
+                $selfieImageUrl = $module['imageUrl'] ?? null;
+            }
+        }
+        
+        return [
+            'transaction_id' => $kycData['transaction_id'] ?? null,
+            'status' => $kycData['status'] ?? null,
+            'name' => $idCardDetails['full_name'] ?? $idCardDetails['fullName'] ?? null,
+            'date_of_birth' => $idCardDetails['date_of_birth'] ?? $idCardDetails['dateOfBirth'] ?? null,
+            'address' => $idCardDetails['address'] ?? null,
+            'id_number' => $idCardDetails['id_number'] ?? $idCardDetails['idNumber'] ?? null,
+            'id_type' => $idCardDetails['id_type'] ?? $idCardDetails['idType'] ?? null,
+            'nationality' => $idCardDetails['nationality'] ?? null,
+            // Image URLs from HyperVerge
+            'id_card_full' => $idCardImageUrl,
+            'id_card_cropped' => $idCardCroppedImageUrl,
+            'selfie' => $selfieImageUrl,
+        ];
     }
 }

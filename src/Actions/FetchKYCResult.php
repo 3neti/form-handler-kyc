@@ -87,6 +87,9 @@ class FetchKYCResult
                 'status' => $module->status,
                 'module_id' => $module->moduleId,
                 'details' => $module->details,
+                // Include image URLs if available
+                'imageUrl' => $module->imageUrl ?? null,
+                'croppedImageUrl' => $module->croppedImageUrl ?? null,
             ], $result->modules),
         ];
 
