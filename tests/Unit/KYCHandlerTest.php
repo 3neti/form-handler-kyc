@@ -13,12 +13,14 @@ test('returns correct handler name', function () {
     expect($handler->getName())->toBe('kyc');
 });
 
-test('config schema includes title and description', function () {
+test('config schema includes copy and shared UI variant controls', function () {
     $handler = new KYCHandler;
     $schema = $handler->getConfigSchema();
 
     expect($schema)->toHaveKey('title')
-        ->and($schema)->toHaveKey('description');
+        ->and($schema)->toHaveKey('description')
+        ->and($schema)->toHaveKey('ui_variant')
+        ->and($schema['ui_variant'])->toContain('default,compact,immersive');
 });
 
 test('handler auto-registers with form-flow-manager', function () {
