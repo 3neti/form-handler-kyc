@@ -17,10 +17,11 @@ class FetchKYCResult
 
     /**
      * Fetch latest KYC results from HyperVerge.
-     * 
+     *
      * @param  string  $transactionId  The HyperVerge transaction ID
-     * @return array  Structured KYC result data
-     * @throws \Exception  If results not ready or API error
+     * @return array Structured KYC result data
+     *
+     * @throws \Exception If results not ready or API error
      */
     public function handle(string $transactionId): array
     {
@@ -38,7 +39,7 @@ class FetchKYCResult
             \Log::info('[FetchKYCResult] 🎭 FAKE MODE - Returning mock data', [
                 'transaction_id' => $transactionId,
             ]);
-            
+
             // Return mock approved KYC data
             return [
                 'transaction_id' => $transactionId,
@@ -82,7 +83,7 @@ class FetchKYCResult
             'transaction_id' => $transactionId,
             'status' => $status,
             'application_status' => $result->applicationStatus,
-            'modules' => array_map(fn($module) => [
+            'modules' => array_map(fn ($module) => [
                 'module' => $module->module,
                 'status' => $module->status,
                 'module_id' => $module->moduleId,

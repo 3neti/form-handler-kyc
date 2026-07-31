@@ -14,7 +14,7 @@ A Form Flow Manager plugin for identity verification using HyperVerge KYC API.
 ## Installation
 
 ```bash
-composer require 3neti/form-handler-kyc
+composer require 3neti/form-handler-kyc:^1.1
 ```
 
 ## Usage
@@ -47,8 +47,9 @@ KYC_AUTO_REDIRECT_DELAY=2  # seconds
 ## Requirements
 
 - PHP 8.2+
-- Laravel 12+
-- 3neti/hyperverge package
+- Laravel 12 or 13
+- 3neti/form-flow 1.8+
+- 3neti/hyperverge 1.1+ or 2.0 beta+
 - HTTPS (required by HyperVerge)
 - Mobile device with camera (for user)
 
@@ -73,9 +74,9 @@ KYC status is stored on the `Contact` model, not per-flow:
 ## Testing
 
 ```bash
-cd packages/form-handler-kyc
 composer install
-vendor/bin/pest
+composer test
+composer pint -- --test
 ```
 
 ## Routes

@@ -8,7 +8,7 @@ use Spatie\LaravelData\Data;
 
 /**
  * KYC Data
- * 
+ *
  * Represents KYC verification status and metadata.
  */
 class KYCData extends Data

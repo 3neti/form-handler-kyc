@@ -18,17 +18,17 @@ class InitiateKYC
 
     /**
      * Generate HyperVerge onboarding link.
-     * 
+     *
      * @param  string  $flowId  The form flow ID
      * @param  string  $mobile  The mobile number
      * @param  string  $country  The country code (default: PH)
-     * @return array  KYC initiation data
+     * @return array KYC initiation data
      */
     public function handle(string $flowId, string $mobile, string $country = 'PH'): array
     {
         // Generate unique transaction ID (use hyphens, avoid dots for HyperVerge)
         $cleanFlowId = str_replace('.', '-', $flowId);
-        $transactionId = "formflow-{$cleanFlowId}-" . now()->timestamp;
+        $transactionId = "formflow-{$cleanFlowId}-".now()->timestamp;
 
         // Build redirect URL for callback (simple format - no flow_id in path)
         $redirectUrl = route('form-flow.kyc.callback');
@@ -44,8 +44,8 @@ class InitiateKYC
         // Check if fake mode is enabled
         if (config('kyc-handler.use_fake', false)) {
             // In fake mode, redirect directly to callback with auto_approved status
-            $onboardingUrl = $redirectUrl . '?transactionId=' . urlencode($transactionId) . '&status=auto_approved';
-            
+            $onboardingUrl = $redirectUrl.'?transactionId='.urlencode($transactionId).'&status=auto_approved';
+
             \Log::info('[InitiateKYC] 🎭 FAKE MODE - Skipping HyperVerge', [
                 'flow_id' => $flowId,
                 'fake_callback_url' => $onboardingUrl,
