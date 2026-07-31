@@ -1,211 +1,189 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
+use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Session;
+use LBHurtado\FormFlowManager\Data\FormFlowInstructionsData;
 use LBHurtado\FormFlowManager\Services\FormFlowService;
-use LBHurtado\FormHandlerKYC\Actions\FetchKYCResult;
-use LBHurtado\FormHandlerKYC\Actions\InitiateKYC;
+use LBHurtado\FormHandlerKYC\Tests\TestCase;
 
-uses(Tests\TestCase::class, RefreshDatabase::class);
+uses(TestCase::class, RefreshDatabase::class);
 
 beforeEach(function () {
-    // Clear session before each test
     Session::flush();
+    Cache::flush();
 });
 
-test('fake mode: complete flow Form → KYC → Location', function () {
-    // Enable fake mode
+test('fake mode completes a form, KYC, and form flow', function () {
     Config::set('kyc-handler.use_fake', true);
-    
-    // Create a form flow with 3 steps
+    Http::fake();
+
     $flowService = app(FormFlowService::class);
     $instructions = [
-        'reference_id' => 'test-kyc-flow-' . time(),
+        'reference_id' => 'test-kyc-flow-'.time(),
         'steps' => [
             ['handler' => 'form', 'config' => ['fields' => [['name' => 'mobile', 'type' => 'text']]]],
             ['handler' => 'kyc', 'config' => []],
-            ['handler' => 'location', 'config' => []],
+            ['handler' => 'form', 'config' => ['fields' => [['name' => 'address', 'type' => 'text']]]],
         ],
         'callbacks' => [
             'on_complete' => 'http://example.com/callback',
         ],
     ];
-    
-    $state = $flowService->startFlow(\LBHurtado\FormFlowManager\Data\FormFlowInstructionsData::from($instructions));
+
+    $state = $flowService->startFlow(FormFlowInstructionsData::from($instructions));
     $flowId = $state['flow_id'];
-    
-    // Step 1: Complete form step
+
     $this->post("/form-flow/{$flowId}/step/0", [
         'data' => ['mobile' => '09173011987'],
-    ])->assertRedirect("/form-flow/{$flowId}");
-    
-    // Verify step 0 completed
+    ])->assertOk();
+
     $state = $flowService->getFlowState($flowId);
     expect($state['current_step'])->toBe(1);
     expect($state['collected_data'][0])->toHaveKey('mobile');
-    
-    // Step 2: Complete KYC step (fake mode)
+
     $this->post("/form-flow/{$flowId}/step/1", [
         'data' => ['mobile' => '09173011987', 'country' => 'PH'],
-    ])->assertRedirect("/form-flow/{$flowId}");
-    
-    // Verify step 1 completed with mock KYC data
+    ])->assertOk();
+
     $state = $flowService->getFlowState($flowId);
     expect($state['current_step'])->toBe(2);
-    expect($state['collected_data'][1])->toHaveKeys(['status', 'modules', 'transaction_id']);
+    expect($state['collected_data'][1])->toHaveKeys([
+        'status',
+        'transaction_id',
+        'id_card_full',
+        'id_card_cropped',
+        'selfie',
+    ]);
     expect($state['collected_data'][1]['status'])->toBe('approved');
-    
-    // Step 3: Complete location step
+
     $this->post("/form-flow/{$flowId}/step/2", [
-        'data' => ['latitude' => 14.5995, 'longitude' => 120.9842],
-    ])->assertRedirect("/form-flow/{$flowId}");
-    
-    // Verify flow completed
+        'data' => ['address' => 'Quezon City'],
+    ])->assertOk();
+
     $state = $flowService->getFlowState($flowId);
     expect($state['current_step'])->toBe(3);
+
+    $this->post("/form-flow/{$flowId}/complete")
+        ->assertOk()
+        ->assertJsonPath('state.status', 'completed');
+
+    $state = $flowService->getFlowState($flowId);
     expect($state['status'])->toBe('completed');
 });
 
-test('real mode: initiate stores step_index in session', function () {
-    Config::set('kyc-handler.use_fake', false);
-    
+test('initiation stores callback context independently of the browser session', function () {
+    Config::set('kyc-handler.use_fake', true);
+
     $flowService = app(FormFlowService::class);
     $instructions = [
-        'reference_id' => 'test-kyc-real-' . time(),
+        'reference_id' => 'test-kyc-initiate-'.time(),
         'steps' => [
             ['handler' => 'form', 'config' => []],
             ['handler' => 'kyc', 'config' => []],
         ],
         'callbacks' => ['on_complete' => 'http://example.com/callback'],
     ];
-    
-    $state = $flowService->startFlow(\LBHurtado\FormFlowManager\Data\FormFlowInstructionsData::from($instructions));
+
+    $state = $flowService->startFlow(FormFlowInstructionsData::from($instructions));
     $flowId = $state['flow_id'];
-    
-    // Complete form step first
+
     $this->post("/form-flow/{$flowId}/step/0", [
         'data' => ['mobile' => '09173011987'],
-    ]);
-    
-    // Mock HyperVerge response to avoid actual API call
-    $this->mock(InitiateKYC::class, function ($mock) {
-        $mock->shouldReceive('handle')
-            ->once()
-            ->andReturn([
-                'transaction_id' => 'test-transaction-123',
-                'onboarding_url' => 'http://hyperverge.test/kyc',
-                'mobile' => '09173011987',
-                'country' => 'PH',
-                'status' => 'pending',
-            ]);
-    });
-    
-    // Initiate KYC
+    ])->assertOk();
+
     $this->post("/form-flow/{$flowId}/kyc/initiate", [
         'mobile' => '09173011987',
         'country' => 'PH',
         'step_index' => 1,
-    ]);
-    
-    // Verify step_index stored in session
-    expect(Session::get("form_flow.{$flowId}.kyc.step_index"))->toBe(1);
+    ])->assertRedirect();
+
+    $transactionId = Session::get("form_flow.{$flowId}.kyc.transaction_id");
+
+    expect($transactionId)->toBeString()
+        ->and(Cache::get("kyc_context.{$transactionId}"))
+        ->toMatchArray([
+            'flow_id' => $flowId,
+            'step_index' => 1,
+            'mobile' => '09173011987',
+            'country' => 'PH',
+        ]);
 });
 
-test('real mode: callback completes step via FormFlowService', function () {
-    Config::set('kyc-handler.use_fake', true); // Use fake for FetchKYCResult
-    
+test('callback completes the KYC step through cached context', function () {
+    Config::set('kyc-handler.use_fake', true);
+
     $flowService = app(FormFlowService::class);
     $instructions = [
-        'reference_id' => 'test-kyc-callback-' . time(),
+        'reference_id' => 'test-kyc-callback-'.time(),
         'steps' => [
             ['handler' => 'form', 'config' => []],
             ['handler' => 'kyc', 'config' => []],
-            ['handler' => 'location', 'config' => []],
+            ['handler' => 'form', 'config' => []],
         ],
         'callbacks' => ['on_complete' => 'http://example.com/callback'],
     ];
-    
-    $state = $flowService->startFlow(\LBHurtado\FormFlowManager\Data\FormFlowInstructionsData::from($instructions));
+
+    $state = $flowService->startFlow(FormFlowInstructionsData::from($instructions));
     $flowId = $state['flow_id'];
-    
-    // Complete form step
+
     $this->post("/form-flow/{$flowId}/step/0", [
         'data' => ['mobile' => '09173011987'],
-    ]);
-    
-    // Simulate initiate storing step_index
-    Session::put("form_flow.{$flowId}.kyc.step_index", 1);
-    
-    // Create transaction ID format: formflow-{flow_id}-{timestamp}
-    $cleanFlowId = str_replace('.', '-', $flowId);
-    $transactionId = "formflow-{$cleanFlowId}-" . time();
-    
-    // Call callback (simulating HyperVerge redirect)
+    ])->assertOk();
+
+    $this->post("/form-flow/{$flowId}/kyc/initiate", [
+        'mobile' => '09173011987',
+        'country' => 'PH',
+        'step_index' => 1,
+    ])->assertRedirect();
+
+    $transactionId = Session::get("form_flow.{$flowId}.kyc.transaction_id");
+
     $this->get("/form-flow/kyc/callback?transactionId={$transactionId}&status=auto_approved")
         ->assertRedirect("/form-flow/{$flowId}");
-    
-    // Verify step 1 completed
+
     $state = $flowService->getFlowState($flowId);
-    expect($state['current_step'])->toBe(2); // Advanced to next step
+    expect($state['current_step'])->toBe(2);
     expect($state['collected_data'][1])->toHaveKey('status');
     expect($state['collected_data'][1]['status'])->toBe('approved');
 });
 
-test('callback handles missing step_index gracefully', function () {
-    $flowService = app(FormFlowService::class);
-    $instructions = [
-        'reference_id' => 'test-kyc-missing-step-' . time(),
-        'steps' => [['handler' => 'kyc', 'config' => []]],
-        'callbacks' => ['on_complete' => 'http://example.com/callback'],
-    ];
-    
-    $state = $flowService->startFlow(\LBHurtado\FormFlowManager\Data\FormFlowInstructionsData::from($instructions));
-    $flowId = $state['flow_id'];
-    
-    // Don't store step_index (simulate session expiration)
-    
-    $cleanFlowId = str_replace('.', '-', $flowId);
-    $transactionId = "formflow-{$cleanFlowId}-" . time();
-    
+test('callback fails closed when its initiation context is missing', function () {
     Config::set('kyc-handler.use_fake', true);
-    
-    // Call callback without step_index
-    $this->get("/form-flow/kyc/callback?transactionId={$transactionId}&status=auto_approved")
-        ->assertRedirect("/form-flow/{$flowId}")
-        ->assertSessionHas('error');
+
+    $this->get('/form-flow/kyc/callback?transactionId=unknown&status=auto_approved')
+        ->assertNotFound()
+        ->assertSee('Transaction context not found');
 });
 
 test('flow state preserved across redirect', function () {
     Config::set('kyc-handler.use_fake', true);
-    
+
     $flowService = app(FormFlowService::class);
     $instructions = [
-        'reference_id' => 'test-kyc-state-' . time(),
+        'reference_id' => 'test-kyc-state-'.time(),
         'steps' => [
             ['handler' => 'form', 'config' => []],
             ['handler' => 'kyc', 'config' => []],
         ],
         'callbacks' => ['on_complete' => 'http://example.com/callback'],
     ];
-    
-    $state = $flowService->startFlow(\LBHurtado\FormFlowManager\Data\FormFlowInstructionsData::from($instructions));
+
+    $state = $flowService->startFlow(FormFlowInstructionsData::from($instructions));
     $flowId = $state['flow_id'];
-    
-    // Complete form step
+
     $this->post("/form-flow/{$flowId}/step/0", [
         'data' => ['email' => 'test@example.com', 'name' => 'Test User'],
-    ]);
-    
-    // Store step data before KYC
+    ])->assertOk();
+
     $stateBeforeKYC = $flowService->getFlowState($flowId);
-    
-    // Complete KYC step
+
     $this->post("/form-flow/{$flowId}/step/1", [
         'data' => ['mobile' => '09173011987'],
-    ]);
-    
-    // Verify previous step data still exists
+    ])->assertOk();
+
     $stateAfterKYC = $flowService->getFlowState($flowId);
     expect($stateAfterKYC['collected_data'][0])->toEqual($stateBeforeKYC['collected_data'][0]);
     expect($stateAfterKYC['collected_data'][1])->toHaveKey('status');
