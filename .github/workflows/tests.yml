@@ -68,7 +68,18 @@ jobs:
         run: vendor/bin/pint --test
 
       - name: Run tests
-        run: composer test
+        id: tests
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          composer test -- --compact 2>&1 | tee /tmp/pest.log
+
+      - name: Report test failure
+        if: steps.tests.outcome == 'failure'
+        run: |
+          message=$(tail -n 60 /tmp/pest.log | tr '\n' ' ' | sed 's/%/%25/g; s/\r/%0D/g; s/\n/%0A/g')
+          echo "::error title=KYC test suite failed::$message"
+          exit 1
 
       - name: Audit dependencies
         run: composer audit
