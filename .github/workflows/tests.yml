@@ -72,7 +72,7 @@ jobs:
         continue-on-error: true
         run: |
           set -o pipefail
-          composer test -- --compact 2>&1 | tee /tmp/pest.log
+          composer test 2>&1 | tee /tmp/pest.log
 
       - name: Report test failure
         if: steps.tests.outcome == 'failure'
