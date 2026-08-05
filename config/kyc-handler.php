@@ -47,4 +47,24 @@ return [
     |
     */
     'auto_redirect_delay' => env('KYC_AUTO_REDIRECT_DELAY', 2),
+
+    /*
+    |--------------------------------------------------------------------------
+    | Refurbishable KYC Attempts
+    |--------------------------------------------------------------------------
+    |
+    | A Pay Code keeps its identity and reserved principal while a claimant
+    | starts a fresh provider attempt. Prior attempts remain immutable and a
+    | superseded attempt can never advance the active claim flow.
+    |
+    */
+    'retryable_statuses' => [
+        'needs_review',
+        'rejected',
+        'cancelled',
+        'expired',
+        'error',
+    ],
+
+    'attempt_retention_minutes' => env('KYC_ATTEMPT_RETENTION_MINUTES', 10_080),
 ];

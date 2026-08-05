@@ -10,6 +10,7 @@ use Inertia\Inertia;
 use LBHurtado\FormFlowManager\Contracts\FormHandlerInterface;
 use LBHurtado\FormFlowManager\Data\FormFlowStepData;
 use LBHurtado\FormFlowManager\Services\FormFlowService;
+use LBHurtado\FormHandlerKYC\Services\KYCFlowAttemptStore;
 
 /**
  * KYC Handler
@@ -110,9 +111,10 @@ class KYCHandler implements FormHandlerInterface
         $mobile = $flatData['mobile'] ?? $flatData['phone'] ?? $flatData['mobile_number'] ?? null;
         $country = 'PH';
 
-        // Get KYC status from session
         $kycData = Session::get("form_flow.{$flowId}.kyc", []);
-        $kycStatus = $kycData['status'] ?? null;
+        $kycStatus = app(KYCFlowAttemptStore::class)->active($flowId)['status']
+            ?? $kycData['status']
+            ?? null;
 
         return Inertia::render('form-flow/kyc/KYCInitiatePage', [
             'flow_id' => $flowId,

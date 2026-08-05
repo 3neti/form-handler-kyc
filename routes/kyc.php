@@ -17,6 +17,7 @@ use LBHurtado\FormHandlerKYC\Http\Controllers\KYCFlowController;
 
 Route::prefix('form-flow/{flow_id}/kyc')->name('form-flow.kyc.')->group(function () {
     Route::post('/initiate', [KYCFlowController::class, 'initiate'])->name('initiate');
+    Route::post('/retry', [KYCFlowController::class, 'retry'])->name('retry');
     Route::get('/status', [KYCFlowController::class, 'status'])->name('status');
 });
 

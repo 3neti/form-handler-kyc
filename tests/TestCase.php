@@ -4,6 +4,7 @@ namespace LBHurtado\FormHandlerKYC\Tests;
 
 use LBHurtado\FormFlowManager\FormFlowServiceProvider;
 use LBHurtado\FormHandlerKYC\KYCHandlerServiceProvider;
+use LBHurtado\HyperVerge\HypervergeServiceProvider;
 use Orchestra\Testbench\TestCase as BaseTestCase;
 use Spatie\LaravelData\LaravelDataServiceProvider;
 
@@ -16,6 +17,7 @@ abstract class TestCase extends BaseTestCase
     {
         return [
             LaravelDataServiceProvider::class,
+            HypervergeServiceProvider::class,
             FormFlowServiceProvider::class,
             KYCHandlerServiceProvider::class,
         ];

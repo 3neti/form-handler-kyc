@@ -70,11 +70,14 @@ class FetchKYCResult
         // Fetch real results from HyperVerge
         $result = FetchHyperVergeResult::run($transactionId);
 
-        // Map status from applicationStatus (auto_approved, user_cancelled, needs_review)
+        // Preserve provider states so pending review never masquerades as completion.
         $status = match ($result->applicationStatus) {
             'auto_approved' => 'approved',
-            'user_cancelled' => 'cancelled',
-            'needs_review' => 'pending',
+            'needs_review' => 'needs_review',
+            'user_cancelled', 'cancelled' => 'cancelled',
+            'rejected', 'declined', 'auto_declined' => 'rejected',
+            'expired' => 'expired',
+            'created', 'pending', 'processing', 'in_progress' => 'processing',
             default => 'processing',
         };
 

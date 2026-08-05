@@ -17,96 +17,241 @@ use Inertia\Response as InertiaResponse;
 use LBHurtado\FormFlowManager\Services\FormFlowService;
 use LBHurtado\FormHandlerKYC\Actions\FetchKYCResult;
 use LBHurtado\FormHandlerKYC\Actions\InitiateKYC;
+use LBHurtado\FormHandlerKYC\Services\KYCFlowAttemptStore;
+use Throwable;
 
-/**
- * Handle KYC flow within form flow system.
- */
-class KYCFlowController extends Controller
+final class KYCFlowController extends Controller
 {
-    /**
-     * Initiate KYC verification for the contact in form flow.
-     */
+    public function __construct(
+        private readonly FormFlowService $flows,
+        private readonly KYCFlowAttemptStore $attempts,
+    ) {}
+
     public function initiate(Request $request, string $flow_id): RedirectResponse|\Symfony\Component\HttpFoundation\Response
     {
-        Log::info('[KYCFlowController::initiate] Starting KYC initiation', [
-            'flow_id' => $flow_id,
-            'request_data' => $request->all(),
-        ]);
-
-        // Get mobile and step_index from request
-        $mobile = $request->input('mobile');
-        $country = $request->input('country', 'PH');
+        $mobile = trim((string) $request->input('mobile'));
+        $country = mb_strtoupper(trim((string) $request->input('country', 'PH')));
         $stepIndex = (int) $request->input('step_index', 0);
 
-        if (! $mobile) {
-            Log::error('[KYCFlowController] No mobile provided', [
-                'flow_id' => $flow_id,
-            ]);
+        Log::info('[KYCFlowController::initiate] Starting KYC initiation', [
+            'flow_id' => $flow_id,
+            'step_index' => $stepIndex,
+            'has_mobile' => $mobile !== '',
+        ]);
 
+        if ($mobile === '') {
             return redirect()
                 ->back()
                 ->with('error', 'Mobile number is required for KYC verification.');
         }
 
-        // Check if already completed in session
-        $existingStatus = Session::get("form_flow.{$flow_id}.kyc.status");
-        if ($existingStatus === 'approved') {
-            Log::info('[KYCFlowController] KYC already approved', [
-                'flow_id' => $flow_id,
-            ]);
-
+        if (($this->attempts->active($flow_id)['status'] ?? null) === 'approved') {
             return redirect()
                 ->route('form-flow.show', ['flow_id' => $flow_id])
                 ->with('success', 'Identity already verified!');
         }
 
-        // Generate onboarding link
+        return $this->startAttempt(
+            flowId: $flow_id,
+            mobile: $mobile,
+            country: $country,
+            stepIndex: $stepIndex,
+            flowState: $this->flows->getFlowState($flow_id),
+        );
+    }
+
+    public function retry(string $flow_id): RedirectResponse|\Symfony\Component\HttpFoundation\Response
+    {
+        $activeAttempt = $this->activeAttemptFromSharedOrLegacyState($flow_id);
+
+        if (! $this->attempts->canRetry($activeAttempt)) {
+            return redirect()
+                ->route('form-flow.show', ['flow_id' => $flow_id])
+                ->with('error', 'This identity check is not eligible for another attempt.');
+        }
+
+        $transactionId = (string) ($activeAttempt['transaction_id'] ?? '');
+        $context = Cache::get("kyc_context.{$transactionId}");
+
+        if (! is_array($context)) {
+            return redirect()
+                ->route('form-flow.show', ['flow_id' => $flow_id])
+                ->with('error', 'The identity-check context expired. Restart the Pay Code claim.');
+        }
+
+        return $this->startAttempt(
+            flowId: $flow_id,
+            mobile: (string) ($context['mobile'] ?? ''),
+            country: (string) ($context['country'] ?? 'PH'),
+            stepIndex: (int) ($context['step_index'] ?? 0),
+            flowState: $this->flows->getFlowState($flow_id) ?? ($context['flow_state'] ?? null),
+        );
+    }
+
+    public function callback(Request $request): InertiaResponse|RedirectResponse|Response
+    {
+        $callbackStatus = trim((string) $request->query('status'));
+        $transactionId = trim((string) $request->query('transactionId'));
+
+        Log::info('[KYCFlowController] KYC callback received', [
+            'transaction_id' => $transactionId,
+            'status' => $callbackStatus,
+        ]);
+
+        $context = Cache::get("kyc_context.{$transactionId}");
+
+        if (! is_array($context)) {
+            Log::error('[KYCFlowController] No context found for transaction_id', [
+                'transaction_id' => $transactionId,
+            ]);
+
+            return response('Transaction context not found. Please restart KYC.', 404);
+        }
+
+        $flowId = (string) $context['flow_id'];
+        $stepIndex = (int) $context['step_index'];
+        $this->restoreFlowStateWhenMissing($flowId, $context['flow_state'] ?? null);
+
         try {
-            $kycData = InitiateKYC::run($flow_id, $mobile, $country);
+            $kycData = FetchKYCResult::run($transactionId);
 
-            // Store KYC data in session
-            Session::put("form_flow.{$flow_id}.kyc", $kycData);
+            if (in_array($callbackStatus, ['user_cancelled', 'cancelled'], true) && ($kycData['status'] ?? null) !== 'approved') {
+                $kycData['status'] = 'cancelled';
+                $kycData['application_status'] = $callbackStatus;
+            }
 
-            // CRITICAL: Store flow context AND state in cache (survives redirect)
-            $flowService = app(FormFlowService::class);
-            $flowState = $flowService->getFlowState($flow_id);
+            $this->attempts->record($flowId, $transactionId, $kycData);
+        } catch (Throwable $exception) {
+            Log::error('[KYCFlowController] Failed to fetch KYC results', [
+                'flow_id' => $flowId,
+                'transaction_id' => $transactionId,
+                'error' => $exception->getMessage(),
+            ]);
 
-            // FIX: Ensure current_step matches the step user is on when they initiated KYC
-            // This is crucial for updateStepData() to advance correctly (it checks current_step === stepIndex)
-            if ($flowState) {
+            return redirect()
+                ->route('form-flow.show', ['flow_id' => $flowId])
+                ->with('error', 'Failed to fetch KYC results.');
+        }
+
+        if (! $this->attempts->isActive($flowId, $transactionId)) {
+            return $this->statusPage(
+                flowId: $flowId,
+                transactionId: $transactionId,
+                initialStatus: 'superseded',
+                canRetry: false,
+            );
+        }
+
+        if (($kycData['status'] ?? null) === 'approved') {
+            $this->completeApprovedAttempt($flowId, $stepIndex, $transactionId, $kycData);
+
+            return redirect()
+                ->route('form-flow.show', ['flow_id' => $flowId])
+                ->with('success', 'Identity verified successfully!');
+        }
+
+        $initialStatus = trim((string) ($kycData['status'] ?? ''));
+
+        if ($initialStatus === '') {
+            $initialStatus = $callbackStatus !== '' ? $callbackStatus : 'processing';
+        }
+
+        return $this->statusPage(
+            flowId: $flowId,
+            transactionId: $transactionId,
+            initialStatus: $initialStatus,
+            canRetry: $this->attempts->canRetry($this->attempts->active($flowId)),
+        );
+    }
+
+    public function status(string $flow_id): JsonResponse
+    {
+        $activeAttempt = $this->activeAttemptFromSharedOrLegacyState($flow_id);
+
+        if ($activeAttempt === null) {
+            return response()->json([
+                'status' => 'unavailable',
+                'error' => 'Identity-check state is unavailable. Restart the Pay Code claim.',
+                'can_retry' => false,
+                'attempt_count' => 0,
+            ]);
+        }
+
+        $transactionId = (string) $activeAttempt['transaction_id'];
+        $context = Cache::get("kyc_context.{$transactionId}");
+        $status = (string) ($activeAttempt['status'] ?? 'processing');
+
+        if (in_array($status, ['pending', 'processing', 'needs_review'], true)) {
+            try {
+                $result = FetchKYCResult::run($transactionId);
+                $this->attempts->record($flow_id, $transactionId, $result);
+                $activeAttempt = $this->attempts->active($flow_id) ?? $activeAttempt;
+                $status = (string) ($activeAttempt['status'] ?? 'processing');
+
+                if ($status === 'approved' && is_array($context)) {
+                    $this->restoreFlowStateWhenMissing($flow_id, $context['flow_state'] ?? null);
+                    $this->completeApprovedAttempt(
+                        $flow_id,
+                        (int) ($context['step_index'] ?? 0),
+                        $transactionId,
+                        $result,
+                    );
+                }
+            } catch (Throwable $exception) {
+                Log::debug('[KYCFlowController] Results not ready yet', [
+                    'flow_id' => $flow_id,
+                    'transaction_id' => $transactionId,
+                    'error' => $exception->getMessage(),
+                ]);
+            }
+        }
+
+        $activeAttempt = $this->attempts->active($flow_id) ?? $activeAttempt;
+
+        return response()->json($this->statusPayload($flow_id, $activeAttempt));
+    }
+
+    /**
+     * @param  array<string, mixed>|null  $flowState
+     */
+    private function startAttempt(
+        string $flowId,
+        string $mobile,
+        string $country,
+        int $stepIndex,
+        ?array $flowState,
+    ): RedirectResponse|\Symfony\Component\HttpFoundation\Response {
+        try {
+            $kycData = InitiateKYC::run($flowId, $mobile, $country);
+            Session::put("form_flow.{$flowId}.kyc", $kycData);
+
+            if (is_array($flowState)) {
                 $flowState['current_step'] = $stepIndex;
             }
 
             Cache::put("kyc_context.{$kycData['transaction_id']}", [
-                'flow_id' => $flow_id,
+                'flow_id' => $flowId,
                 'step_index' => $stepIndex,
                 'mobile' => $mobile,
                 'country' => $country,
-                'flow_state' => $flowState, // Store entire flow state
+                'flow_state' => $flowState,
                 'initiated_at' => now()->toIso8601String(),
-            ], now()->addHours(24));
+            ], now()->addMinutes((int) config('kyc-handler.attempt_retention_minutes', 10_080)));
 
-            Log::debug('[KYCFlowController] Flow context stored in cache', [
-                'flow_id' => $flow_id,
-                'transaction_id' => $kycData['transaction_id'],
+            $this->attempts->begin($flowId, (string) $kycData['transaction_id'], [
+                'status' => (string) ($kycData['status'] ?? 'pending'),
+                'application_status' => (string) ($kycData['status'] ?? 'pending'),
             ]);
 
-            Log::info('[KYCFlowController] Redirecting to HyperVerge', [
-                'flow_id' => $flow_id,
-                'transaction_id' => $kycData['transaction_id'],
-            ]);
-
-            // Check if fake mode - use regular redirect for internal URLs
             if (config('kyc-handler.use_fake', false)) {
                 return redirect($kycData['onboarding_url']);
             }
 
-            // Use Inertia location for external redirect (HyperVerge)
             return Inertia::location($kycData['onboarding_url']);
-        } catch (\Exception $e) {
+        } catch (Throwable $exception) {
             Log::error('[KYCFlowController] Failed to initiate KYC', [
-                'flow_id' => $flow_id,
-                'error' => $e->getMessage(),
+                'flow_id' => $flowId,
+                'error' => $exception->getMessage(),
             ]);
 
             return redirect()
@@ -115,191 +260,133 @@ class KYCFlowController extends Controller
         }
     }
 
-    /**
-     * Handle callback from HyperVerge after user completes KYC.
-     * Uses transactionId from query params to find flow_id.
-     */
-    public function callback(Request $request): InertiaResponse|RedirectResponse|Response
+    /** @return array<string, mixed>|null */
+    private function activeAttemptFromSharedOrLegacyState(string $flowId): ?array
     {
-        // Get params from HyperVerge callback
-        $callbackStatus = $request->query('status');
-        $transactionId = $request->query('transactionId');
+        $activeAttempt = $this->attempts->active($flowId);
 
-        Log::info('[KYCFlowController] KYC callback received', [
-            'transaction_id' => $transactionId,
-            'status' => $callbackStatus,
+        if ($activeAttempt !== null) {
+            return $activeAttempt;
+        }
+
+        $legacy = Session::get("form_flow.{$flowId}.kyc");
+
+        if (! is_array($legacy) || ! is_string($legacy['transaction_id'] ?? null)) {
+            return null;
+        }
+
+        $this->attempts->begin($flowId, $legacy['transaction_id'], [
+            'status' => (string) ($legacy['status'] ?? 'pending'),
+            'application_status' => (string) ($legacy['application_status'] ?? $legacy['status'] ?? 'pending'),
+            'rejection_reasons' => (array) ($legacy['rejection_reasons'] ?? []),
         ]);
 
-        // Retrieve flow context from cache by transaction_id (like stash pattern)
-        $context = Cache::get("kyc_context.{$transactionId}");
+        return $this->attempts->active($flowId);
+    }
 
-        if (! $context) {
-            Log::error('[KYCFlowController] No context found for transaction_id', [
-                'transaction_id' => $transactionId,
-            ]);
+    /**
+     * @param  array<string, mixed>  $kycData
+     */
+    private function completeApprovedAttempt(
+        string $flowId,
+        int $stepIndex,
+        string $transactionId,
+        array $kycData,
+    ): void {
+        Cache::lock("kyc_completion.{$flowId}", 10)->block(5, function () use ($flowId, $stepIndex, $transactionId, $kycData): void {
+            if (! $this->attempts->isActive($flowId, $transactionId)) {
+                return;
+            }
 
-            return response('Transaction context not found. Please restart KYC.', 404);
-        }
+            $flattened = $this->flattenKYCData($kycData);
+            $flattened['_step_name'] = 'kyc_verification';
+            $this->flows->updateStepData($flowId, $stepIndex, $flattened);
 
-        $flow_id = $context['flow_id'];
-        $stepIndex = $context['step_index'];
-        $flowState = $context['flow_state'];
-
-        // CRITICAL: Only restore flow state if session is completely lost
-        // Do NOT restore if session already exists, as it may have newer data
-        $flowService = app(FormFlowService::class);
-        $sessionExists = $flowService->flowExists($flow_id);
-
-        if (! $sessionExists) {
-            // Ensure flow state has all required keys
-            $flowState['completed_steps'] = $flowState['completed_steps'] ?? [];
-            $flowState['collected_data'] = $flowState['collected_data'] ?? [];
-            $flowState['current_step'] = $flowState['current_step'] ?? 0;
-
-            Session::put("form_flow.{$flow_id}", $flowState);
-
-            Log::debug('[KYCFlowController] Flow state restored from cache', [
-                'flow_id' => $flow_id,
-            ]);
-        }
-
-        // Fetch KYC results from HyperVerge
-        try {
-            $kycData = FetchKYCResult::run($transactionId);
-        } catch (\Exception $e) {
-            Log::error('[KYCFlowController] Failed to fetch KYC results', [
-                'flow_id' => $flow_id,
-                'transaction_id' => $transactionId,
-                'error' => $e->getMessage(),
-            ]);
-
-            return redirect()
-                ->route('form-flow.show', ['flow_id' => $flow_id])
-                ->with('error', 'Failed to fetch KYC results.');
-        }
-
-        // Flatten KYC data for consistent storage (same format as fake mode)
-        $flattenedKycData = $this->flattenKYCData($kycData);
-
-        // Add step name for consistent normalization in downstream processing
-        $flattenedKycData['_step_name'] = 'kyc_verification';
-
-        // Complete the step via FormFlowService
-        try {
-            $flowService = app(FormFlowService::class);
-            $flowService->updateStepData($flow_id, $stepIndex, $flattenedKycData);
-
-            // CRITICAL: Store completed step in cache for browser session to pick up
-            // This is necessary because callback runs in different session than user's browser
-            // NOTE: Store FLATTENED data (not raw $kycData) so FormFlowController uses consistent format
-            Cache::put("kyc_completed.{$flow_id}", [
+            Cache::put("kyc_completed.{$flowId}", [
                 'step_index' => $stepIndex,
-                'kyc_data' => $flattenedKycData,
+                'kyc_data' => $flattened,
                 'completed_at' => now()->toIso8601String(),
             ], now()->addMinutes(10));
 
             Log::info('[KYCFlowController] KYC step completed', [
-                'flow_id' => $flow_id,
+                'flow_id' => $flowId,
                 'step_index' => $stepIndex,
-                'status' => $kycData['status'] ?? 'unknown',
+                'transaction_id' => $transactionId,
+                'status' => 'approved',
             ]);
-        } catch (\Exception $e) {
-            Log::error('[KYCFlowController] Failed to complete step', [
-                'flow_id' => $flow_id,
-                'step_index' => $stepIndex,
-                'error' => $e->getMessage(),
-            ]);
+        });
+    }
 
-            return redirect()
-                ->route('form-flow.show', ['flow_id' => $flow_id])
-                ->with('error', 'Failed to complete KYC step.');
+    /** @param array<string, mixed>|null $flowState */
+    private function restoreFlowStateWhenMissing(string $flowId, ?array $flowState): void
+    {
+        if ($this->flows->flowExists($flowId) || ! is_array($flowState)) {
+            return;
         }
 
-        // Handle different statuses
-        if ($callbackStatus === 'user_cancelled') {
-            return redirect()
-                ->route('form-flow.show', ['flow_id' => $flow_id])
-                ->with('error', 'Identity verification was cancelled.');
-        }
+        $flowState['completed_steps'] ??= [];
+        $flowState['collected_data'] ??= [];
+        $flowState['current_step'] ??= 0;
+        Session::put("form_flow.{$flowId}", $flowState);
+    }
 
-        if ($kycData['status'] === 'approved' || $callbackStatus === 'auto_approved') {
-            // KYC approved - continue to next step
-            return redirect()
-                ->route('form-flow.show', ['flow_id' => $flow_id])
-                ->with('success', 'Identity verified successfully!');
-        }
-
-        // Still processing - show status page
+    private function statusPage(
+        string $flowId,
+        string $transactionId,
+        string $initialStatus,
+        bool $canRetry,
+    ): InertiaResponse {
         return Inertia::render('form-flow/kyc/KYCStatusPage', [
-            'flow_id' => $flow_id,
+            'flow_id' => $flowId,
             'transaction_id' => $transactionId,
+            'initial_status' => $initialStatus,
+            'can_retry' => $canRetry,
+            'status_url' => route('form-flow.kyc.status', ['flow_id' => $flowId]),
+            'retry_url' => route('form-flow.kyc.retry', ['flow_id' => $flowId]),
+            'continue_url' => route('form-flow.show', ['flow_id' => $flowId]),
+            'polling_interval' => max(2, (int) config('kyc-handler.polling_interval', 5)),
             'ui_variant' => config('form-flow.ui.variant', 'default'),
         ]);
     }
 
     /**
-     * Check KYC status for polling (AJAX endpoint).
+     * @param  array<string, mixed>  $attempt
+     * @return array<string, mixed>
      */
-    public function status(Request $request, string $flow_id): JsonResponse
+    private function statusPayload(string $flowId, array $attempt): array
     {
-        // Get KYC data from cache (fallback to session for user's browser)
-        $kycData = Cache::get("kyc.{$flow_id}") ?? Session::get("form_flow.{$flow_id}.kyc", []);
-
-        if (empty($kycData)) {
-            return response()->json([
-                'status' => null,
-                'error' => 'KYC data not found',
-            ], 400);
-        }
-
-        // Fetch latest results if still processing
-        if (in_array($kycData['status'] ?? '', ['pending', 'processing'])) {
-            try {
-                $result = FetchKYCResult::run($kycData['transaction_id']);
-
-                // Update session with results
-                $kycData = array_merge($kycData, $result);
-                Session::put("form_flow.{$flow_id}.kyc", $kycData);
-            } catch (\Exception $e) {
-                Log::debug('[KYCFlowController] Results not ready yet', [
-                    'flow_id' => $flow_id,
-                    'error' => $e->getMessage(),
-                ]);
-            }
-        }
-
-        Log::debug('[KYCFlowController] Status check', [
-            'flow_id' => $flow_id,
-            'status' => $kycData['status'] ?? 'unknown',
-        ]);
-
-        return response()->json([
-            'status' => $kycData['status'] ?? 'pending',
-            'transaction_id' => $kycData['transaction_id'] ?? null,
-            'completed_at' => $kycData['completed_at'] ?? null,
-            'rejection_reasons' => $kycData['rejection_reasons'] ?? [],
-        ]);
+        return [
+            'status' => $attempt['status'] ?? 'processing',
+            'application_status' => $attempt['application_status'] ?? null,
+            'transaction_id' => $attempt['transaction_id'] ?? null,
+            'completed_at' => $attempt['completed_at'] ?? null,
+            'rejection_reasons' => $attempt['rejection_reasons'] ?? [],
+            'can_retry' => $this->attempts->canRetry($attempt),
+            'attempt_count' => $this->attempts->attemptCount($flowId),
+            'retry_url' => route('form-flow.kyc.retry', ['flow_id' => $flowId]),
+            'continue_url' => route('form-flow.show', ['flow_id' => $flowId]),
+        ];
     }
 
     /**
-     * Flatten KYC data for storage.
-     * Extracts nested module details to root level for consistent mapping.
+     * @param  array<string, mixed>  $kycData
+     * @return array<string, mixed>
      */
-    protected function flattenKYCData(array $kycData): array
+    private function flattenKYCData(array $kycData): array
     {
-        $idCardDetails = null;
+        $idCardDetails = [];
         $idCardImageUrl = null;
         $idCardCroppedImageUrl = null;
         $selfieImageUrl = null;
 
-        // Find id_card and selfie modules
         foreach ($kycData['modules'] ?? [] as $module) {
-            if (in_array($module['module'], ['id_card', 'ID Card Validation', 'ID Card Validation front'])) {
-                $idCardDetails = $module['details'] ?? [];
+            if (in_array($module['module'] ?? null, ['id_card', 'ID Card Validation', 'ID Card Validation front'], true)) {
+                $idCardDetails = (array) ($module['details'] ?? []);
                 $idCardImageUrl = $module['imageUrl'] ?? null;
                 $idCardCroppedImageUrl = $module['croppedImageUrl'] ?? null;
             }
-            if (in_array($module['module'], ['selfie', 'Selfie Validation'])) {
+
+            if (in_array($module['module'] ?? null, ['selfie', 'Selfie Validation'], true)) {
                 $selfieImageUrl = $module['imageUrl'] ?? null;
             }
         }
@@ -307,13 +394,13 @@ class KYCFlowController extends Controller
         return [
             'transaction_id' => $kycData['transaction_id'] ?? null,
             'status' => $kycData['status'] ?? null,
+            'application_status' => $kycData['application_status'] ?? null,
             'name' => $idCardDetails['full_name'] ?? $idCardDetails['fullName'] ?? null,
             'date_of_birth' => $idCardDetails['date_of_birth'] ?? $idCardDetails['dateOfBirth'] ?? null,
             'address' => $idCardDetails['address'] ?? null,
             'id_number' => $idCardDetails['id_number'] ?? $idCardDetails['idNumber'] ?? null,
             'id_type' => $idCardDetails['id_type'] ?? $idCardDetails['idType'] ?? null,
             'nationality' => $idCardDetails['nationality'] ?? null,
-            // Image URLs from HyperVerge
             'id_card_full' => $idCardImageUrl,
             'id_card_cropped' => $idCardCroppedImageUrl,
             'selfie' => $selfieImageUrl,

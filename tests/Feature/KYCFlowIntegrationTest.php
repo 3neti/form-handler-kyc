@@ -7,6 +7,8 @@ use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Session;
 use LBHurtado\FormFlowManager\Data\FormFlowInstructionsData;
 use LBHurtado\FormFlowManager\Services\FormFlowService;
+use LBHurtado\FormHandlerKYC\Actions\FetchKYCResult;
+use LBHurtado\FormHandlerKYC\Services\KYCFlowAttemptStore;
 use LBHurtado\FormHandlerKYC\Tests\TestCase;
 
 uses(TestCase::class, RefreshDatabase::class);
@@ -187,4 +189,225 @@ test('flow state preserved across redirect', function () {
     $stateAfterKYC = $flowService->getFlowState($flowId);
     expect($stateAfterKYC['collected_data'][0])->toEqual($stateBeforeKYC['collected_data'][0]);
     expect($stateAfterKYC['collected_data'][1])->toHaveKey('status');
+});
+
+test('needs review remains incomplete and is available across browser sessions', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Config::set('hyperverge.url_workflow', 'onboarding');
+
+    Http::fake([
+        '*/link-kyc/results' => Http::response([
+            'status' => 'success',
+            'statusCode' => '200',
+            'metadata' => [
+                'requestId' => 'request-review',
+                'transactionId' => 'transaction-review',
+            ],
+            'result' => [
+                'applicationStatus' => 'needs_review',
+                'results' => [],
+            ],
+        ]),
+    ]);
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'test-kyc-review-'.time(),
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+            ['handler' => 'form', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    app(KYCFlowAttemptStore::class)->begin($flowId, 'transaction-review');
+    Cache::put('kyc_context.transaction-review', [
+        'flow_id' => $flowId,
+        'step_index' => 1,
+        'mobile' => '09173011987',
+        'country' => 'PH',
+        'flow_state' => $state,
+    ]);
+
+    Session::flush();
+
+    expect(FetchKYCResult::run('transaction-review')['status'])->toBe('needs_review');
+
+    $this->getJson("/form-flow/{$flowId}/kyc/status")
+        ->assertSuccessful()
+        ->assertJsonPath('status', 'needs_review')
+        ->assertJsonPath('can_retry', true)
+        ->assertJsonPath('attempt_count', 1);
+
+    expect(Cache::get("kyc_completed.{$flowId}"))->toBeNull()
+        ->and(app(KYCFlowAttemptStore::class)->active($flowId)['status'])
+        ->toBe('needs_review');
+});
+
+test('approved provider status completes only the active attempt', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Config::set('hyperverge.url_workflow', 'onboarding');
+
+    Http::fake([
+        '*/link-kyc/results' => Http::response([
+            'status' => 'success',
+            'statusCode' => '200',
+            'metadata' => [
+                'requestId' => 'request-approved',
+                'transactionId' => 'transaction-approved',
+            ],
+            'result' => [
+                'applicationStatus' => 'auto_approved',
+                'results' => [],
+            ],
+        ]),
+    ]);
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'test-kyc-approved-'.time(),
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+            ['handler' => 'form', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    app(KYCFlowAttemptStore::class)->begin($flowId, 'transaction-approved');
+    Cache::put('kyc_context.transaction-approved', [
+        'flow_id' => $flowId,
+        'step_index' => 1,
+        'mobile' => '09173011987',
+        'country' => 'PH',
+        'flow_state' => $state,
+    ]);
+
+    expect(FetchKYCResult::run('transaction-approved')['status'])->toBe('approved');
+
+    $this->getJson("/form-flow/{$flowId}/kyc/status")
+        ->assertSuccessful()
+        ->assertJsonPath('status', 'approved')
+        ->assertJsonPath('can_retry', false);
+
+    $freshState = $flowService->getFlowState($flowId);
+
+    expect($freshState['current_step'])->toBe(2)
+        ->and($freshState['collected_data'][1]['status'])->toBe('approved')
+        ->and(data_get(Cache::get("kyc_completed.{$flowId}"), 'kyc_data.status'))->toBe('approved');
+});
+
+test('retry keeps the Pay Code flow and supersedes the prior KYC attempt', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('hyperverge.test_mode', true);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Config::set('hyperverge.url_workflow', 'onboarding');
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'pay-code-TEST-9DVZ',
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+            ['handler' => 'form', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    $store = app(KYCFlowAttemptStore::class);
+    $store->begin($flowId, 'transaction-original');
+    $store->record($flowId, 'transaction-original', [
+        'status' => 'needs_review',
+        'application_status' => 'needs_review',
+    ]);
+    Cache::put('kyc_context.transaction-original', [
+        'flow_id' => $flowId,
+        'step_index' => 1,
+        'mobile' => '09173011987',
+        'country' => 'PH',
+        'flow_state' => $state,
+    ]);
+
+    $this->post("/form-flow/{$flowId}/kyc/retry")
+        ->assertRedirect();
+
+    $attemptState = $store->state($flowId);
+
+    expect($attemptState['active_transaction_id'])->not->toBe('transaction-original')
+        ->and($attemptState['attempts'])->toHaveCount(2)
+        ->and($attemptState['attempts'][0]['active'])->toBeFalse()
+        ->and($attemptState['attempts'][0]['superseded_at'])->not->toBeNull()
+        ->and($attemptState['attempts'][1]['active'])->toBeTrue()
+        ->and($flowService->getFlowState($flowId)['current_step'])->toBe(1);
+});
+
+test('superseded KYC approval cannot advance the claim flow', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Config::set('hyperverge.url_workflow', 'onboarding');
+
+    Http::fake([
+        '*/link-kyc/results' => Http::response([
+            'status' => 'success',
+            'statusCode' => '200',
+            'metadata' => [
+                'requestId' => 'request-old-approved',
+                'transactionId' => 'transaction-old',
+            ],
+            'result' => [
+                'applicationStatus' => 'auto_approved',
+                'results' => [],
+            ],
+        ]),
+    ]);
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'test-kyc-superseded-'.time(),
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+            ['handler' => 'form', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    $store = app(KYCFlowAttemptStore::class);
+    $store->begin($flowId, 'transaction-old');
+    Cache::put('kyc_context.transaction-old', [
+        'flow_id' => $flowId,
+        'step_index' => 1,
+        'mobile' => '09173011987',
+        'country' => 'PH',
+        'flow_state' => $state,
+    ]);
+    $store->begin($flowId, 'transaction-current');
+
+    $this->withHeader('X-Inertia', 'true')
+        ->get('/form-flow/kyc/callback?transactionId=transaction-old&status=auto_approved')
+        ->assertSuccessful()
+        ->assertJsonPath('component', 'form-flow/kyc/KYCStatusPage')
+        ->assertJsonPath('props.initial_status', 'superseded');
+
+    expect($flowService->getFlowState($flowId)['current_step'])->toBe(1)
+        ->and(Cache::get("kyc_completed.{$flowId}"))->toBeNull();
 });
