@@ -40,6 +40,18 @@ return [
 
     /*
     |--------------------------------------------------------------------------
+    | Provider Result Consistency Grace
+    |--------------------------------------------------------------------------
+    |
+    | HyperVerge may briefly accept an identity attempt before its results API
+    | can locate the transaction. Keep polling during this grace period. After
+    | it expires, fail closed and let the claimant start a fresh attempt.
+    |
+    */
+    'provider_result_grace_seconds' => env('KYC_PROVIDER_RESULT_GRACE_SECONDS', 120),
+
+    /*
+    |--------------------------------------------------------------------------
     | Auto Redirect Delay
     |--------------------------------------------------------------------------
     |

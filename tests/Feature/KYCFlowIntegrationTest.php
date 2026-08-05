@@ -1,6 +1,7 @@
 <?php
 
 use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Config;
 use Illuminate\Support\Facades\Http;
@@ -248,6 +249,93 @@ test('needs review remains incomplete and is available across browser sessions',
     expect(Cache::get("kyc_completed.{$flowId}"))->toBeNull()
         ->and(app(KYCFlowAttemptStore::class)->active($flowId)['status'])
         ->toBe('needs_review');
+});
+
+test('provider transaction absence remains pending during the consistency grace period', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('kyc-handler.provider_result_grace_seconds', 120);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Carbon::setTestNow('2026-08-05 12:00:00');
+
+    Http::fake([
+        '*/link-kyc/results' => Http::response([
+            'status' => 'failure',
+            'statusCode' => 422,
+            'result' => ['error' => 'TransactionId not found'],
+        ], 422),
+    ]);
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'test-provider-grace',
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    app(KYCFlowAttemptStore::class)->begin($flowId, 'transaction-eventual');
+
+    Carbon::setTestNow('2026-08-05 12:01:00');
+
+    $this->getJson("/form-flow/{$flowId}/kyc/status")
+        ->assertSuccessful()
+        ->assertJsonPath('status', 'pending')
+        ->assertJsonPath('can_retry', false);
+
+    expect($flowService->getFlowState($flowId)['current_step'])->toBe(1)
+        ->and(Cache::get("kyc_completed.{$flowId}"))->toBeNull();
+});
+
+test('provider transaction absence becomes a retryable error after the consistency grace period', function () {
+    Config::set('kyc-handler.use_fake', false);
+    Config::set('kyc-handler.provider_result_grace_seconds', 120);
+    Config::set('hyperverge.app_id', 'test-app');
+    Config::set('hyperverge.app_key', 'test-key');
+    Carbon::setTestNow('2026-08-05 12:00:00');
+
+    Http::fake([
+        '*/link-kyc/results' => Http::response([
+            'status' => 'failure',
+            'statusCode' => 422,
+            'result' => ['error' => 'TransactionId not found'],
+        ], 422),
+    ]);
+
+    $flowService = app(FormFlowService::class);
+    $state = $flowService->startFlow(FormFlowInstructionsData::from([
+        'reference_id' => 'test-provider-missing',
+        'steps' => [
+            ['handler' => 'form', 'config' => []],
+            ['handler' => 'kyc', 'config' => []],
+        ],
+        'callbacks' => ['on_complete' => 'http://example.com/callback'],
+    ]));
+    $flowId = $state['flow_id'];
+    $state['current_step'] = 1;
+    Session::put("form_flow.{$flowId}", $state);
+
+    app(KYCFlowAttemptStore::class)->begin($flowId, 'transaction-missing');
+
+    Carbon::setTestNow('2026-08-05 12:02:01');
+
+    $this->getJson("/form-flow/{$flowId}/kyc/status")
+        ->assertSuccessful()
+        ->assertJsonPath('status', 'error')
+        ->assertJsonPath('application_status', 'provider_transaction_unavailable')
+        ->assertJsonPath('can_retry', true)
+        ->assertJsonPath(
+            'rejection_reasons.0',
+            'The identity provider could not locate this attempt. Start a new identity check.',
+        );
+
+    expect($flowService->getFlowState($flowId)['current_step'])->toBe(1)
+        ->and(Cache::get("kyc_completed.{$flowId}"))->toBeNull();
 });
 
 test('approved provider status completes only the active attempt', function () {

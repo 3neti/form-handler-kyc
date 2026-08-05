@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace LBHurtado\FormHandlerKYC\Http\Controllers;
 
+use Carbon\CarbonImmutable;
+use Illuminate\Http\Client\RequestException;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
@@ -122,6 +124,15 @@ final class KYCFlowController extends Controller
 
             $this->attempts->record($flowId, $transactionId, $kycData);
         } catch (Throwable $exception) {
+            if ($this->recordUnavailableProviderTransactionWhenGraceExpired($flowId, $transactionId, $exception)) {
+                return $this->statusPage(
+                    flowId: $flowId,
+                    transactionId: $transactionId,
+                    initialStatus: 'error',
+                    canRetry: true,
+                );
+            }
+
             Log::error('[KYCFlowController] Failed to fetch KYC results', [
                 'flow_id' => $flowId,
                 'transaction_id' => $transactionId,
@@ -198,6 +209,12 @@ final class KYCFlowController extends Controller
                     );
                 }
             } catch (Throwable $exception) {
+                $this->recordUnavailableProviderTransactionWhenGraceExpired(
+                    $flow_id,
+                    $transactionId,
+                    $exception,
+                );
+
                 Log::debug('[KYCFlowController] Results not ready yet', [
                     'flow_id' => $flow_id,
                     'transaction_id' => $transactionId,
@@ -209,6 +226,57 @@ final class KYCFlowController extends Controller
         $activeAttempt = $this->attempts->active($flow_id) ?? $activeAttempt;
 
         return response()->json($this->statusPayload($flow_id, $activeAttempt));
+    }
+
+    private function recordUnavailableProviderTransactionWhenGraceExpired(
+        string $flowId,
+        string $transactionId,
+        Throwable $exception,
+    ): bool {
+        if (! $this->isProviderTransactionUnavailable($exception)) {
+            return false;
+        }
+
+        $attempt = $this->attempts->active($flowId);
+
+        if (($attempt['transaction_id'] ?? null) !== $transactionId) {
+            return false;
+        }
+
+        $initiatedAt = CarbonImmutable::parse((string) ($attempt['initiated_at'] ?? now()->toIso8601String()));
+        $graceSeconds = max(0, (int) config('kyc-handler.provider_result_grace_seconds', 120));
+
+        if ($initiatedAt->addSeconds($graceSeconds)->isFuture()) {
+            return false;
+        }
+
+        $this->attempts->record($flowId, $transactionId, [
+            'status' => 'error',
+            'application_status' => 'provider_transaction_unavailable',
+            'rejection_reasons' => [
+                'The identity provider could not locate this attempt. Start a new identity check.',
+            ],
+        ]);
+
+        Log::warning('[KYCFlowController] Provider could not locate KYC attempt after grace period', [
+            'flow_id' => $flowId,
+            'transaction_id' => $transactionId,
+            'grace_seconds' => $graceSeconds,
+        ]);
+
+        return true;
+    }
+
+    private function isProviderTransactionUnavailable(Throwable $exception): bool
+    {
+        if (! $exception instanceof RequestException) {
+            return false;
+        }
+
+        $response = $exception->response;
+
+        return $response->status() === 422
+            && mb_strtolower(trim((string) data_get($response->json(), 'result.error'))) === 'transactionid not found';
     }
 
     /**
