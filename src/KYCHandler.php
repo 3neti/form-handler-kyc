@@ -8,6 +8,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Session;
 use Inertia\Inertia;
 use LBHurtado\FormFlowManager\Contracts\FormHandlerInterface;
+use LBHurtado\FormFlowManager\Contracts\FormHandlerPreviewInterface;
 use LBHurtado\FormFlowManager\Data\FormFlowStepData;
 use LBHurtado\FormFlowManager\Services\FormFlowService;
 use LBHurtado\FormHandlerKYC\Services\KYCFlowAttemptStore;
@@ -18,7 +19,7 @@ use LBHurtado\FormHandlerKYC\Services\KYCFlowAttemptStore;
  * Handles identity verification using HyperVerge.
  * Unlike other handlers, KYC involves external redirect and async results.
  */
-class KYCHandler implements FormHandlerInterface
+class KYCHandler implements FormHandlerInterface, FormHandlerPreviewInterface
 {
     public function getName(): string
     {
@@ -116,8 +117,27 @@ class KYCHandler implements FormHandlerInterface
             ?? $kycData['status']
             ?? null;
 
-        return Inertia::render('form-flow/kyc/KYCInitiatePage', [
-            'flow_id' => $flowId,
+        return Inertia::render('form-flow/kyc/KYCInitiatePage', $this->props($step, $context, $mobile, $country, $kycStatus));
+    }
+
+    public function preview(FormFlowStepData $step, array $context = []): array
+    {
+        return [
+            'component' => 'form-flow/kyc/KYCInitiatePage',
+            'props' => $this->props(
+                $step,
+                array_merge($context, ['preview_mode' => true]),
+                (string) ($context['mobile'] ?? $context['preview_mobile'] ?? '0917 000 0000'),
+                (string) ($context['country'] ?? 'PH'),
+                null,
+            ),
+        ];
+    }
+
+    protected function props(FormFlowStepData $step, array $context, ?string $mobile, string $country, ?string $kycStatus): array
+    {
+        return [
+            'flow_id' => $context['flow_id'] ?? null,
             'step' => (string) ($context['step_index'] ?? 0),
             'config' => array_merge($step->config, [
                 'use_fake' => config('kyc-handler.use_fake', false),
@@ -126,7 +146,8 @@ class KYCHandler implements FormHandlerInterface
             'mobile' => $mobile,
             'country' => $country,
             'ui_variant' => $step->config['ui_variant'] ?? config('form-flow.ui.variant', 'default'),
-        ]);
+            'preview_mode' => (bool) ($context['preview_mode'] ?? false),
+        ];
     }
 
     public function getConfigSchema(): array

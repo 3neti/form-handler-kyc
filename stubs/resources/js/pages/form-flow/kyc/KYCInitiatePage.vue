@@ -20,6 +20,7 @@ interface Props {
   mobile?: string | null;
   country?: string;
   ui_variant?: FormFlowUiVariant | string | null;
+  preview_mode?: boolean;
 }
 
 const props = defineProps<Props>();
@@ -63,6 +64,7 @@ function approvedPayload(extra: Record<string, any> = {}): Record<string, any> {
 }
 
 const startKYC = () => {
+  if (props.preview_mode) return;
   console.log("[KYCInitiatePage] Starting KYC verification", {
     flow_id: props.flow_id,
     step: props.step,
@@ -113,6 +115,7 @@ const startKYC = () => {
 };
 
 const continueFlow = () => {
+  if (props.preview_mode) return;
   console.log("[KYCInitiatePage] already approved - continuing flow", {
     flow_id: props.flow_id,
     step: props.step,

@@ -1,11 +1,24 @@
 <?php
 
 use LBHurtado\FormFlowManager\Contracts\FormHandlerInterface;
+use LBHurtado\FormFlowManager\Contracts\FormHandlerPreviewInterface;
+use LBHurtado\FormFlowManager\Data\FormFlowStepData;
 use LBHurtado\FormHandlerKYC\KYCHandler;
 
 test('implements FormHandlerInterface', function () {
     $handler = new KYCHandler;
     expect($handler)->toBeInstanceOf(FormHandlerInterface::class);
+});
+
+test('previews the production KYC screen in inert mode', function () {
+    $preview = (new KYCHandler)->preview(
+        FormFlowStepData::from(['handler' => 'kyc', 'config' => []]),
+        ['preview_mobile' => '09170000000'],
+    );
+
+    expect(new KYCHandler)->toBeInstanceOf(FormHandlerPreviewInterface::class)
+        ->and($preview['component'])->toBe('form-flow/kyc/KYCInitiatePage')
+        ->and($preview['props']['preview_mode'])->toBeTrue();
 });
 
 test('returns correct handler name', function () {
@@ -33,4 +46,9 @@ test('handler auto-registers with form-flow-manager', function () {
 test('validate always returns true', function () {
     $handler = new KYCHandler;
     expect($handler->validate([], []))->toBeTrue();
+});
+test('published claim screen fails closed in preview mode', function () {
+    $source = file_get_contents(dirname(__DIR__, 2).'/stubs/resources/js/pages/form-flow/kyc/KYCInitiatePage.vue');
+
+    expect($source)->toContain('props.preview_mode');
 });
