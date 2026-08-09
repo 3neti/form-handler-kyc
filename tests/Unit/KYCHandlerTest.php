@@ -40,7 +40,7 @@ test('config schema includes copy and shared UI variant controls', function () {
         ->and($schema)->toHaveKey('package_versions')
         ->and($schema)->toHaveKey('show_package_versions')
         ->and($schema['ui_variant'])->toContain('default,compact,immersive')
-        ->and($schema['action_placement'])->toContain('inline,bottom,bottom_sticky');
+        ->and($schema['action_placement'])->toContain('inline,bottom,bottom_sticky,viewport_bottom');
 });
 
 test('handler auto-registers with form-flow-manager', function () {
