@@ -33,7 +33,14 @@ test('config schema includes copy and shared UI variant controls', function () {
     expect($schema)->toHaveKey('title')
         ->and($schema)->toHaveKey('description')
         ->and($schema)->toHaveKey('ui_variant')
-        ->and($schema['ui_variant'])->toContain('default,compact,immersive');
+        ->and($schema)->toHaveKey('action_placement')
+        ->and($schema)->toHaveKey('ui_layout')
+        ->and($schema)->toHaveKey('app_name')
+        ->and($schema)->toHaveKey('app_logo')
+        ->and($schema)->toHaveKey('package_versions')
+        ->and($schema)->toHaveKey('show_package_versions')
+        ->and($schema['ui_variant'])->toContain('default,compact,immersive')
+        ->and($schema['action_placement'])->toContain('inline,bottom,bottom_sticky');
 });
 
 test('handler auto-registers with form-flow-manager', function () {
