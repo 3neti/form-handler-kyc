@@ -216,6 +216,7 @@ test('needs review remains incomplete and is available across browser sessions',
     $flowService = app(FormFlowService::class);
     $state = $flowService->startFlow(FormFlowInstructionsData::from([
         'reference_id' => 'test-kyc-review-'.time(),
+        'presentation' => ['brand' => ['name' => 'Synthetic Claim']],
         'steps' => [
             ['handler' => 'form', 'config' => []],
             ['handler' => 'kyc', 'config' => []],
@@ -239,6 +240,13 @@ test('needs review remains incomplete and is available across browser sessions',
     Session::flush();
 
     expect(FetchKYCResult::run('transaction-review')['status'])->toBe('needs_review');
+
+    $this->withHeader('X-Inertia', 'true')
+        ->get('/form-flow/kyc/callback?transactionId=transaction-review&status=needs_review')
+        ->assertSuccessful()
+        ->assertJsonPath('component', 'form-flow/kyc/KYCStatusPage')
+        ->assertJsonPath('props.presentation.brand.name', 'Synthetic Claim')
+        ->assertJsonPath('props.presentation.progress.current', 2);
 
     $this->getJson("/form-flow/{$flowId}/kyc/status")
         ->assertSuccessful()

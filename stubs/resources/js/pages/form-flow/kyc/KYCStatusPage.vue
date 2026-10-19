@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FormFlowPresentation from "@/pages/form-flow/core/components/FormFlowPresentation.vue";
+import type { FormFlowPresentation as PresentationPolicy } from "@/pages/form-flow/core/components/formFlowPresentation";
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import { router } from "@inertiajs/vue3";
 import {
@@ -14,6 +16,7 @@ import FormFlowScreen from "@/pages/form-flow/core/components/FormFlowScreen.vue
 import type { FormFlowUiVariant } from "@/pages/form-flow/core/components/formFlowUiVariant";
 
 interface Props {
+  presentation?: PresentationPolicy | null;
   flow_id: string;
   transaction_id: string;
   initial_status?: string;
@@ -124,6 +127,7 @@ onUnmounted(stopPolling);
 </script>
 
 <template>
+  <FormFlowPresentation :presentation="presentation">
   <PublicLayout>
     <FormFlowScreen
       title="Identity Check"
@@ -245,4 +249,6 @@ onUnmounted(stopPolling);
       </div>
     </FormFlowScreen>
   </PublicLayout>
+
+  </FormFlowPresentation>
 </template>

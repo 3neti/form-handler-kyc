@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import FormFlowPresentation from "@/pages/form-flow/core/components/FormFlowPresentation.vue";
+import type { FormFlowPresentation as PresentationPolicy } from "@/pages/form-flow/core/components/formFlowPresentation";
 import { computed } from "vue";
 import { router } from "@inertiajs/vue3";
 import PublicLayout from "@/layouts/PublicLayout.vue";
@@ -14,6 +16,7 @@ interface PackageVersion {
 }
 
 interface Props {
+  presentation?: PresentationPolicy | null;
   flow_id: string;
   step: string;
   config?: {
@@ -146,6 +149,7 @@ const continueFlow = () => {
 </script>
 
 <template>
+  <FormFlowPresentation :presentation="presentation">
   <PublicLayout>
     <FormFlowScreen
       :title="config?.title || 'Identity Verification'"
@@ -214,4 +218,6 @@ const continueFlow = () => {
       </div>
     </FormFlowScreen>
   </PublicLayout>
+
+  </FormFlowPresentation>
 </template>

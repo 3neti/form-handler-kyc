@@ -404,6 +404,9 @@ final class KYCFlowController extends Controller
         string $initialStatus,
         bool $canRetry,
     ): InertiaResponse {
+        $flowState = $this->flows->getFlowState($flowId);
+        $presentation = data_get($flowState, 'instructions.steps.'.($flowState['current_step'] ?? 0).'.config.presentation');
+
         return Inertia::render('form-flow/kyc/KYCStatusPage', [
             'flow_id' => $flowId,
             'transaction_id' => $transactionId,
@@ -413,7 +416,8 @@ final class KYCFlowController extends Controller
             'retry_url' => route('form-flow.kyc.retry', ['flow_id' => $flowId]),
             'continue_url' => route('form-flow.show', ['flow_id' => $flowId]),
             'polling_interval' => max(2, (int) config('kyc-handler.polling_interval', 5)),
-            'ui_variant' => config('form-flow.ui.variant', 'default'),
+            'ui_variant' => data_get($presentation, 'layout.density', config('form-flow.ui.variant', 'default')),
+            'presentation' => $presentation,
         ]);
     }
 
