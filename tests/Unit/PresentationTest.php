@@ -16,3 +16,11 @@ it('keeps the resolved presentation identical in live and inert preview response
         ->and($live['props']['presentation'])->toBe($policy)
         ->and($preview['props']['preview_mode'])->toBeTrue();
 });
+
+it('registers the kyc screen and resolves its bounded presentation overrides', function () {
+    $policy = app(FormFlowPresentationResolver::class)->resolve([
+        'screens' => ['kyc' => ['tokens' => ['control_size' => 'large'], 'actions' => ['roles' => ['retry' => ['label' => 'Try again']]]]],
+    ], [], 'kyc');
+    expect($policy['tokens']['control_size'])->toBe('large')
+        ->and($policy['actions']['roles']['retry']['label'])->toBe('Try again');
+});

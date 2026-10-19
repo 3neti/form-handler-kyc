@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace LBHurtado\FormHandlerKYC;
 
 use Illuminate\Support\ServiceProvider;
+use LBHurtado\FormFlowManager\Services\FormFlowPresentationResolver;
 use LBHurtado\FormHandlerKYC\Console\InstallKycHandlerCommand;
 
 /**
@@ -36,6 +37,8 @@ class KYCHandlerServiceProvider extends ServiceProvider
      */
     public function boot(): void
     {
+        app(FormFlowPresentationResolver::class)->registerScreens(['kyc']);
+
         // Register console commands
         if ($this->app->runningInConsole()) {
             $this->commands([
